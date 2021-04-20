@@ -1,0 +1,82 @@
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+## SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: weather
+
+Parameters:
+  Client:
+    Description: Client website
+    Type: String
+    Default: https://serverless-weather.com
+
+Resources:
+  AuthStack:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./auth.yaml
+      Parameters:
+        ClientDomain: !Ref Client
+        
+  MyLogGroup:
+    Type: AWS::Logs::LogGroup
+    
+  WeatherApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      AccessLogSettings:
+        DestinationArn: !GetAtt MyLogGroup.Arn
+        Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","routeKey":"$context.routeKey", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength", "integrationError":"$context.integrationErrorMessage","auth-error":"$context.authorizer.error"}'
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+        AllowOrigins:
+          - !Ref Client
+      Auth:
+        Authorizers:
+          GeneralAuth:
+            AuthorizationScopes:
+              - email
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !GetAtt AuthStack.Outputs.Issuer
+              audience:
+                - !GetAtt AuthStack.Outputs.UserPoolClientId
+      DefinitionBody:
+        openapi: "3.0.1"
+        info:
+          title: "Serverless Weather API"
+          version: "1.0"
+        paths:
+          /{zip}:
+            x-amazon-apigateway-any-method:
+              responses:
+                default:
+                  description: "Weather for zip code"
+              security:
+              - GeneralAuth: []
+              x-amazon-apigateway-integration:
+                responseParameters:
+                  "400":
+                    append:header.Location: !Sub "${Client}/instructions"
+                    overwrite:statuscode: "302"
+                requestParameters:
+                  append:querystring.zip: "$request.path.zip"
+                  append:querystring.appid: '{{resolve:secretsmanager:soh/keys:SecretString:WeatherApiKey}}'
+                payloadFormatVersion: "1.0"
+                type: "http_proxy"
+                httpMethod: "ANY"
+                uri: "https://api.openweathermap.org/data/2.5/weather"
+                connectionType: "INTERNET"
+                
+Outputs:
+  HelloWorldApi:
+    Description: "Weather endpoint"
+    Value: !Sub "https://${WeatherApi}.execute-api.${AWS::Region}.amazonaws.com"
+  AuthUrl:
+    Description: Url used to authenticate
+    Value: !GetAtt AuthStack.Outputs.AuthUrl
+  ClientId:
+    Description: Application client ID
+    Value: !GetAtt AuthStack.Outputs.UserPoolClientId
