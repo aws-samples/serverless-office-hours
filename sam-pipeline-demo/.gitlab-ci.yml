@@ -1,0 +1,173 @@
+variables:
+  SAM_TEMPLATE: template.yaml
+  PIPELINE_USER_ACCESS_KEY_ID: ${aws_access}
+  PIPELINE_USER_SECRET_ACCESS_KEY: ${aws_secret}
+  TESTING_STACK_NAME: oh-test
+  TESTING_REGION: us-west-2
+  TESTING_PIPELINE_EXECUTION_ROLE: arn:aws:iam::802066579553:role/aws-sam-cli-managed-oh-test-PipelineExecutionRole-J0TGFUUHEPQN
+  TESTING_CLOUDFORMATION_EXECUTION_ROLE: arn:aws:iam::802066579553:role/aws-sam-cli-managed-oh-te-CloudFormationExecutionR-1DVS8YXK72LDM
+  TESTING_ARTIFACTS_BUCKET: aws-sam-cli-managed-oh-test-pipel-artifactsbucket-160skr7p7lvui
+  # If there are functions with "Image" PackageType in your template,
+  # uncomment the line below and add "--image-repository ${TESTING_IMAGE_REPOSITORY}" to
+  # testing "sam package" and "sam deploy" commands.'
+  # TESTING_IMAGE_REPOSITORY = '0123456789.dkr.ecr.region.amazonaws.com/repository-name'
+  PROD_STACK_NAME: oh-prod
+  PROD_REGION: us-east-1
+  PROD_PIPELINE_EXECUTION_ROLE: arn:aws:iam::325497329038:role/aws-sam-cli-managed-oh-prod-PipelineExecutionRole-18MJEFQAR486J
+  PROD_CLOUDFORMATION_EXECUTION_ROLE: arn:aws:iam::325497329038:role/aws-sam-cli-managed-oh-pr-CloudFormationExecutionR-N6283DOJM2BQ
+  PROD_ARTIFACTS_BUCKET: aws-sam-cli-managed-oh-prod-pipel-artifactsbucket-103nzgki22plb
+  PROD2_STACK_NAME: oh-prod2
+  PROD2_REGION: ap-south-1
+  PROD2_PIPELINE_EXECUTION_ROLE: arn:aws:iam::325497329038:role/aws-sam-cli-managed-oh-prod2-PipelineExecutionRole-133IWT90GMCKX
+  PROD2_CLOUDFORMATION_EXECUTION_ROLE: arn:aws:iam::325497329038:role/aws-sam-cli-managed-oh-pr-CloudFormationExecutionR-F0DTMTH1L4T6
+  PROD2_ARTIFACTS_BUCKET: aws-sam-cli-managed-oh-prod2-pipe-artifactsbucket-xr04f3fx7hw8
+  # If there are functions with "Image" PackageType in your template,
+  # uncomment the line below and add "--image-repository ${PROD_IMAGE_REPOSITORY}" to
+  # prod "sam package" and "sam deploy" commands.'
+  # PROD_IMAGE_REPOSITORY = '0123456789.dkr.ecr.region.amazonaws.com/repository-name'
+  # By default, when using docker:dind, Docker uses the vfs storage
+  # driver which copies the file system on every run.
+  # This is a disk-intensive operation which can be avoided if a different driver is used.
+  # For example overlay2
+  DOCKER_DRIVER: overlay2
+  # Create the certificates inside this directory for both the server
+  # and client. The certificates used by the client will be created in
+  # /certs/client so we only need to share this directory with the
+  # volume mount in `config.toml`.
+  DOCKER_TLS_CERTDIR: "/certs"
+
+# Should always specify a specific version of the image. If using a tag like docker:stable,
+# there will be no control over which version is used. Unpredictable behavior can result.
+image: docker:19.03.15
+
+services:
+    - docker:19.03.15-dind
+
+before_script:
+  - apk add --update python3 py-pip python3-dev build-base
+  - pip install awscli aws-sam-cli
+
+stages:
+  - unit-test
+  - build
+  - testing
+  - prod
+  - prod2
+
+# uncomment and modify the following step for running the unit-tests
+#
+#unit-test:
+#  stage: unit-test
+#  only:
+#    - main
+#    - /^feature-.*$/
+#  script: |
+
+# This stage is triggered only for feature branches (feature*),
+# which will build the stack and deploy to a stack named with branch name.
+build-and-deploy-feature:
+  stage: build
+  only:
+    - /^feature-.*$/
+  script:
+    - . assume-role.sh ${TESTING_PIPELINE_EXECUTION_ROLE} feature-deployment
+    - sam build --template ${SAM_TEMPLATE} --use-container
+    - sam deploy --stack-name $(echo ${CI_COMMIT_REF_NAME} | tr -cd '[a-zA-Z0-9-]')
+                 --capabilities CAPABILITY_IAM
+                 --region ${TESTING_REGION}
+                 --s3-bucket ${TESTING_ARTIFACTS_BUCKET}
+                 --no-fail-on-empty-changeset
+                 --role-arn ${TESTING_CLOUDFORMATION_EXECUTION_ROLE}
+
+# This stage is triggered for main branch you set in the question,
+# which will build the stack, package the application, upload the
+# applications artifacts to Amazon S3 and output the SAM template file.
+build-and-package:
+  stage: build
+  only:
+    - main
+  script:
+    - sam build --template ${SAM_TEMPLATE} --use-container
+
+    - . assume-role.sh ${TESTING_PIPELINE_EXECUTION_ROLE} testing-stage-packaging
+
+    - sam package --s3-bucket ${TESTING_ARTIFACTS_BUCKET}
+                   --region ${TESTING_REGION}
+                   --output-template-file packaged-testing.yaml
+
+    - . assume-role.sh ${PROD_PIPELINE_EXECUTION_ROLE} prod-stage-packaging
+
+    - sam package --s3-bucket ${PROD_ARTIFACTS_BUCKET}
+                  --region ${PROD_REGION}
+                  --output-template-file packaged-prod.yaml
+    - . assume-role.sh ${PROD2_PIPELINE_EXECUTION_ROLE} prod-stage-packaging
+
+    - sam package --s3-bucket ${PROD2_ARTIFACTS_BUCKET}
+                  --region ${PROD2_REGION}
+                  --output-template-file packaged-prod2.yaml
+
+  artifacts:
+    paths:
+      - packaged-testing.yaml
+      - packaged-prod.yaml
+      - packaged-prod2.yaml
+
+# This stage is triggered for main branch you set in the question,
+# which will deploy the testing stage SAM application using
+# the templated file generated.
+deploy-testing:
+  stage: testing
+  only:
+    - main
+  script:
+    - . assume-role.sh ${TESTING_PIPELINE_EXECUTION_ROLE} testing-deployment
+    - sam deploy --stack-name ${TESTING_STACK_NAME}
+                 --template packaged-testing.yaml
+                 --capabilities CAPABILITY_IAM
+                 --region ${TESTING_REGION}
+                 --s3-bucket ${TESTING_ARTIFACTS_BUCKET}
+                 --no-fail-on-empty-changeset
+                 --role-arn ${TESTING_CLOUDFORMATION_EXECUTION_ROLE}
+
+# Uncomment and modify the following stage for integration tests
+#
+#integration-test:
+#  stage: testing
+#  only:
+#    - main
+#  script: |
+#    #trigger the integration tests here
+
+# This stage is triggered for main branch you set in the question,
+# which will deploy the prod stage SAM application using
+# the templated file generated.
+deploy-prod:
+  stage: prod
+  # uncomment this to have a manual approval step before deployment to production
+  # when: manual
+  only:
+    - main
+  script:
+    - . assume-role.sh ${PROD_PIPELINE_EXECUTION_ROLE} prod-deployment
+    - sam deploy --stack-name ${PROD_STACK_NAME}
+                 --template packaged-prod.yaml
+                 --capabilities CAPABILITY_IAM
+                 --region ${PROD_REGION}
+                 --s3-bucket ${PROD_ARTIFACTS_BUCKET}
+                 --no-fail-on-empty-changeset
+                 --role-arn ${PROD_CLOUDFORMATION_EXECUTION_ROLE}
+deploy-prod2:
+  stage: prod2
+  # uncomment this to have a manual approval step before deployment to production
+  # when: manual
+  only:
+    - main
+  script:
+    - . assume-role.sh ${PROD2_PIPELINE_EXECUTION_ROLE} prod-deployment
+    - sam deploy --stack-name ${PROD2_STACK_NAME}
+                 --template packaged-prod2.yaml
+                 --capabilities CAPABILITY_IAM
+                 --region ${PROD2_REGION}
+                 --s3-bucket ${PROD2_ARTIFACTS_BUCKET}
+                 --no-fail-on-empty-changeset
+                 --role-arn ${PROD2_CLOUDFORMATION_EXECUTION_ROLE}
