@@ -2,6 +2,7 @@
 
 SAM hello world application with Gitlab pipeline config. This application was created during demo: https://youtu.be/_1pD4aXV5sU
 
+```
 ├── .aws-sam
 │   └── pipeline
 │       └── pipelineconfig.toml
@@ -11,6 +12,7 @@ SAM hello world application with Gitlab pipeline config. This application was cr
 │   ├── app.js
 │   ├── package.json
 └── template.yaml
+```
 
 ### Files explanation
 
