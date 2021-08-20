@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CORS Tester
+
+Parameters:
+  ClientDomain:
+    Description: Client website for authentication redirects and cors (must start with https://)
+    Type: String
+    Default: http://localhost:3000
+  TestWithPostman:
+    Description: Do you need to test with Postman? (Not recommended for production)
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  AppName:
+    Type: String
+    Description: Unique identifyer for this application
+
+Conditions:
+  UsePostman: !Equals
+    - !Ref TestWithPostman
+    - "true"
+
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  # Create a Cognito User pool foruser management
+  UserPool:
+    Type: AWS::Cognito::UserPool 
+    Properties:
+      Policies: 
+        PasswordPolicy: 
+          MinimumLength: 8
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes: 
+        - email
+      Schema: 
+        - AttributeDataType: String 
+          Name: email 
+          Required: false
+
+  # Scopes for access token
+  UserPoolResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties: 
+      Identifier: com.cors.test
+      Name: MyCorsResourceServer
+      Scopes: 
+        - ScopeDescription: General access scope
+          ScopeName: site.access
+      UserPoolId: !Ref UserPool
+
+  # Create an application for authentication
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient 
+    Properties: 
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Ref ClientDomain
+        - !If [UsePostman, https://oauth.pstmn.io/v1/callback, !Ref AWS::NoValue]
+      LogoutURLs:
+        - !Ref ClientDomain
+        - !If [UsePostman, https://oauth.pstmn.io/v1/callback, !Ref AWS::NoValue]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+        - !If [UsePostman, implicit, !Ref AWS::NoValue]
+      AllowedOAuthScopes:
+        - com.cors.test/site.access
+
+  # Create a hosted domain for users to signup and login
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: 
+      Domain: !Sub myauth${AppName}
+      UserPoolId: !Ref UserPool
+
+######################################################################################
+## API ###############################################################################
+######################################################################################
+
+  API:
+    Type: AWS::Serverless::Api
+    Properties:
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          MyCognitoAuth:
+            AuthorizationScopes:
+              - com.cors.test/site.access
+            UserPoolArn: !GetAtt UserPool.Arn
+            AuthType: "COGNITO_USER_POOLS"
+        DefaultAuthorizer: MyCognitoAuth
+      StageName: Prod
+      TracingEnabled: true
+      Cors:
+        AllowOrigin: !Sub "'${ClientDomain}'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'GET,POST,OPTIONS'"
+
+  ApiResponderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: responder/
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      Events:
+        GetResponder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref API
+            Path: /
+            Method: GET
+        PostResponder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref API
+            Path: /
+            Method: POST
+
+######################################################################################
+## HTTP API ##########################################################################
+######################################################################################
+
+  HTTPAPI:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          OAuth2Authorizer:
+            AuthorizationScopes:
+              - com.cors.test/site.access
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience:
+                - !Ref UserPoolClient
+        DefaultAuthorizer: OAuth2Authorizer
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref ClientDomain
+          - https://myapp.com
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        AllowMethods:
+          - GET
+          - OPTIONS
+
+  # OptionsRoute:
+  #   Type: AWS::ApiGatewayV2::Route
+  #   Properties:
+  #     ApiId: !Ref HTTPAPI
+  #     RouteKey: OPTIONS /{proxy+}
+  #     AuthorizationType: NONE
+        
+  HttpApiResponderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: responder/
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      Events:
+        GetResponder:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HTTPAPI
+            Path: /
+            Method: GET
+
+Outputs:
+  ApiResponderApi:
+    Description: "API Gateway endpoint URL for Prod stage for Hello World function"
+    Value: !Sub "https://${API}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  HttpApiResponderApi:
+    Description: "API Gateway endpoint URL for Prod stage for Hello World function"
+    Value: !Sub "https://${HTTPAPI}.execute-api.${AWS::Region}.amazonaws.com/"
